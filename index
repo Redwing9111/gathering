@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>Albion 掛機採集模擬器 v2.0 - 真實紅區體驗</title>
+  <style>
+    body {
+      font-family: "Segoe UI", sans-serif;
+      background-color: #1e1e1e;
+      color: #f0f0f0;
+      padding: 20px;
+    }
+    h1, h2 { color: #ffcc00; }
+    select, button {
+      font-size: 16px;
+      padding: 8px 16px;
+      margin: 5px;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    #log {
+      margin-top: 20px;
+      max-height: 300px;
+      overflow-y: auto;
+      border: 1px solid #444;
+      padding: 10px;
+      background-color: #2a2a2a;
+    }
+    .log-entry {
+      display: flex;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .log-entry img {
+      width: 32px; height: 32px; margin-right: 10px;
+    }
+    .zone-label { font-weight: bold; color: #66ccff; }
+    #backpackContainer, #warehouseContainer {
+      position: relative;
+      background: #2a2a2a;
+      padding: 15px;
+      border: 1px solid #444;
+      margin-top: 20px;
+    }
+    #backpackStatus, #warehouseStatus {
+      position: absolute;
+      top: 10px;
+      right: 15px;
+      font-size: 16px;
+      color: #ffcc00;
+      text-align: right;
+      line-height: 1.4;
+    }
+    #backpack, #warehouse {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 50px;
+    }
+    .slot {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 80px;
+    }
+    .slot img { width: 40px; height: 40px; }
+    .slot-count { margin-top: 4px; font-size: 14px; }
+
+    /* 回城讀條 */
+    #recallProgress {
+      margin-top: 15px;
+      height: 30px;
+      background: #333;
+      border: 2px solid #ffcc00;
+      position: relative;
+      overflow: hidden;
+      display: none;
+    }
+    #recallBar {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, #00ff00, #ffff00);
+      transition: width 0.9s linear;
+    }
+    #recallText {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 18px;
+      font-weight: bold;
+      color: white;
+      text-shadow: 2px 2px 4px black;
+    }
+  </style>
+</head>
+<body>
+  <h1>Albion 掛機採集模擬器 v2.0 - 黑區版</h1>
+  
+  <label for="zoneSelect">選擇區域：</label>
+  <select id="zoneSelect">
+    <option value="高原">高原（盛產石頭）</option>
+    <option value="沙漠">沙漠（盛產獸皮）</option>
+    <option value="森林">森林（盛產木頭）</option>
+    <option value="雪山">雪山（盛產金屬）</option>
+    <option value="沼澤">沼澤（盛產棉花）</option>
+  </select>
+  <button onclick="startGathering()">開始掛機</button>
+  <button onclick="stopGathering()">停止掛機</button>
+  <button id="recallBtn" onclick="startRecall()">回城存倉庫</button>
+  <button id="cancelRecallBtn" onclick="cancelRecall()" style="display:none;background:#900;">取消回城</button>
+
+  <!-- 回城讀條 -->
+  <div id="recallProgress">
+    <div id="recallBar"></div>
+    <div id="recallText">回城中... 0/5</div>
+  </div>
+
+  <div id="log"></div>
+
+  <h2>背包</h2>
+  <div id="backpackContainer">
+    <div id="backpackStatus">
+      負重：<span id="currentWeight">0</span> / 1500 KG<br>
+      總價值：<span id="totalValue">0</span> 銀幣
+    </div>
+    <div id="backpack"></div>
+  </div>
+
+  <h2>倉庫</h2>
+  <div id="warehouseContainer">
+    <div id="warehouseStatus">
+      負重：<span id="warehouseWeight">0</span> / 999,999 KG<br>
+      總價值：<span id="warehouseValue">0</span> 銀幣
+    </div>
+    <div id="warehouse"></div>
+  </div>
+
+<script>
+  const resources = ["FIBER", "HIDE", "WOOD", "ORE", "ROCK"];
+  const enchantChances = [0.75, 0.15, 0.07, 0.02, 0.01];
+  const zones = {
+    "高原": { main: "ROCK", secondary: ["ORE", "WOOD"] },
+    "沙漠": { main: "HIDE", secondary: ["FIBER", "ORE"] },
+    "森林": { main: "WOOD", secondary: ["HIDE", "ROCK"] },
+    "雪山": { main: "ORE", secondary: ["ROCK", "FIBER"] },
+    "沼澤": { main: "FIBER", secondary: ["WOOD", "HIDE"] }
+  };
+  const silverValue = {
+    FIBER: [20, 40, 80, 160, 320],
+    HIDE: [25, 50,100, 200, 400],
+    WOOD: [15, 30, 60, 120, 240],
+    ORE: [30, 60,120, 240, 480],
+    ROCK: [10, 20, 40, 80, 160]
+  };
+
+  const backpackCount = {};
+  const warehouseCount = {};
+  resources.forEach(t => { for (let i = 0; i < 5; i++) {
+    const k = `${t}_L${i}`;
+    backpackCount[k] = warehouseCount[k] = 0;
+  }});
+
+  let currentWeight = 0, backpackValue = 0;
+  let warehouseWeight = 0, warehouseValue = 0;
+  let gatheringInterval, recallInterval;
+  let recallSeconds = 0;
+
+  function updateAllStatus() {
+    document.getElementById("currentWeight").textContent = currentWeight;
+    document.getElementById("totalValue").textContent = backpackValue.toLocaleString();
+    document.getElementById("warehouseWeight").textContent = warehouseWeight;
+    document.getElementById("warehouseValue").textContent = warehouseValue.toLocaleString();
+  }
+
+  function addLog(html) {
+    const log = document.getElementById("log");
+    const entry = document.createElement("div");
+    entry.className = "log-entry";
+    entry.innerHTML = html;
+    log.prepend(entry);
+  }
+
+  function getRandomEnchantLevel() {
+    const r = Math.random();
+    let sum = 0;
+    for (let i = 0; i < enchantChances.length; i++) {
+      sum += enchantChances[i];
+      if (r < sum) return i;
+    }
+    return 0;
+  }
+
+  function getRandomResource(zoneName) {
+    if (currentWeight >= 1500) {
+      stopGathering();
+      addLog('<span style="color:red;">背包已滿，自動停止採集</span>');
+      return null;
+    }
+    const zone = zones[zoneName];
+    const roll = Math.random();
+    const type = roll < 0.6 ? zone.main : roll < 0.85 ? zone.secondary[0] : zone.secondary[1];
+    const lvl = getRandomEnchantLevel();
+    const key = `${type}_L${lvl}`;
+
+    backpackCount[key]++;
+    currentWeight += 1;
+    backpackValue += silverValue[type][lvl];
+
+    updateSlot("backpack", type, lvl);
+    updateAllStatus();
+
+    const img = `<img src="img/T4_${type}${lvl>0?`_LEVEL${lvl}`:""}.png" onerror="this.src='img/missing.png'">`;
+    addLog(`${img} <span class="zone-label">${zoneName}</span> 採集到 ${type}．${lvl}`);
+    return true;
+  }
+
+  function startGathering() {
+    if (recallInterval) return; // 回城中不能採集
+    const zone = document.getElementById("zoneSelect").value;
+    clearInterval(gatheringInterval);
+    gatheringInterval = setInterval(() => getRandomResource(zone), 1000);
+    addLog(`<span style="color:#0f0;">開始在 ${zone} 掛機採集</span>`);
+  }
+
+  function stopGathering() {
+    clearInterval(gatheringInterval);
+  }
+
+  function updateSlot(container, type, lvl) {
+    const key = `${type}_L${lvl}`;
+    const id = `${container}_${key}`;
+    let slot = document.getElementById(id);
+    const count = container === "backpack" ? backpackCount[key] : warehouseCount[key];
+    if (!slot) {
+      slot = document.createElement("div");
+      slot.className = "slot";
+      slot.id = id;
+      slot.innerHTML = `
+        <img src="img/T4_${type}${lvl>0?`_LEVEL${lvl}`:""}.png" onerror="this.style.border='2px solid red'">
+        <div class="slot-count">x${count}</div>
+      `;
+      document.getElementById(container).appendChild(slot);
+    } else {
+      slot.querySelector(".slot-count").textContent = `x${count}`;
+    }
+    if (count === 0 && container === "backpack") slot.remove();
+  }
+
+  // ==================== 回城系統 ====================
+  function startRecall() {
+    if (currentWeight === 0) {
+      addLog("背包是空的，沒必要冒險回城啦～");
+      return;
+    }
+    if (recallInterval) return;
+
+    recallSeconds = 0;
+    document.getElementById("recallProgress").style.display = "block";
+    document.getElementById("recallBtn").disabled = true;
+    document.getElementById("cancelRecallBtn").style.display = "inline-block";
+
+    recallInterval = setInterval(() => {
+      recallSeconds++;
+      document.getElementById("recallBar").style.width = (recallSeconds * 20) + "%";
+      document.getElementById("recallText").textContent = `回城中... ${recallSeconds}/5`;
+
+      // 每秒 5% 機率被打劫
+      if (Math.random() < 0.05) {
+        // 被打劫成功！
+        clearInterval(recallInterval);
+        recallInterval = null;
+        finishRecall(false); // false = 被搶
+        return;
+      }
+
+      if (recallSeconds >= 5) {
+        clearInterval(recallInterval);
+        recallInterval = null;
+        finishRecall(true); // true = 成功回城
+      }
+    }, 1000);
+  }
+
+  function cancelRecall() {
+    clearInterval(recallInterval);
+    recallInterval = null;
+    resetRecallUI();
+    addLog(`<span style="color:#ff9900;">已取消回城，繼續掛機！</span>`);
+  }
+
+  function finishRecall(success) {
+    resetRecallUI();
+
+    if (success) {
+      // 全部安全存倉庫
+      let totalTransferredValue = 0;
+      for (const type of resources) {
+        for (let lvl = 0; lvl < 5; lvl++) {
+          const key = `${type}_L${lvl}`;
+          const amt = backpackCount[key];
+          if (amt > 0) {
+            backpackCount[key] = 0;
+            warehouseCount[key] += amt;
+            warehouseWeight += amt;
+            warehouseValue += amt * silverValue[type][lvl];
+            totalTransferredValue += amt * silverValue[type][lvl];
+
+            document.getElementById(`backpack_${key}`)?.remove();
+            updateSlot("warehouse", type, lvl);
+          }
+        }
+      }
+      currentWeight = 0;
+      backpackValue = 0;
+      updateAllStatus();
+      addLog(`<span style="color:#00ff00;">回城成功！安全存入 ${totalTransferredValue.toLocaleString()} 銀幣資源</span>`);
+    } else {
+      // 被打劫！全部掉落
+      for (const key in backpackCount) {
+        backpackCount[key] = 0;
+      }
+      currentWeight = 0;
+      backpackValue = 0;
+      document.getElementById("backpack").innerHTML = "";
+      updateAllStatus();
+      addLog(`<span style="color:red;font-size:18px;">你被紅名打劫了！背包 ${backpackValue.toLocaleString()} 銀幣全掉！</span>`);
+    }
+  }
+
+  function resetRecallUI() {
+    document.getElementById("recallProgress").style.display = "none";
+    document.getElementById("recallBar").style.width = "0%";
+    document.getElementById("recallText").textContent = "回城中... 0/5";
+    document.getElementById("recallBtn").disabled = false;
+    document.getElementById("cancelRecallBtn").style.display = "none";
+  }
+
+  updateAllStatus();
+</script>
+</body>
+</html>
